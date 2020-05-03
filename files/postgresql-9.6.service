@@ -1,0 +1,4 @@
+.include /lib/systemd/system/postgresql-9.6.service
+[Service]
+Environment=PGPORT=5432
+Environment=PGDATA=/data/dbdata

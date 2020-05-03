@@ -1,0 +1,188 @@
+---
+- hosts: all
+  become: yes
+  environment: 
+    proxy_env:
+      https_proxy: 'http://proxy.sfu.ca:8080'
+      http_proxy: 'http://proxy.sfu.ca:8080'
+  tasks:
+    - name: Update ntp
+      command: ntpdate time.sfu.ca
+
+    - name: yum-complete-transaction
+      command: yum-complete-transaction --cleanup-only
+
+    - name: Enable repos
+      rhsm_repository:
+        name:
+          - rhel-7-server-optional-rpms
+          - rhel-server-rhscl-7-rpms
+          - rhel-7-server-extras-rpms
+
+    - name: Upgrade all packages
+      yum:
+        name: "*"
+        state: latest
+
+    - name: Install epel
+      yum:
+        name:
+          - epel-release
+          - yum-utils
+          - scl-utils
+
+    - name: Enable epel
+      command: yum-config-manager --enable epel
+
+    - name: Install development tools
+      yum:
+        name: "@Development Tools"
+        state: present
+
+    - name: Install xymon client
+      yum:
+        name: xymon-client
+        disable_gpg_check: yes
+        state: present
+
+    - name: Configure xymon
+      copy:
+        src: ../files/xymon-client
+        dest: /etc/sysconfig/xymon-client
+
+    - name: Start xymon client
+      service:
+        name: xymonlaunch
+        state: started
+        enabled: true
+
+    - name: Install Postgres repo
+      yum:
+        name: https://download.postgresql.org/pub/repos/yum/reporpms/EL-7-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+        state: present
+
+    - name: Install packages
+      yum:
+        name:
+          - postgresql96-server
+          - postgresql96-contrib
+          - postgresql96-libs
+        state: present
+
+    - name: Link pg_config
+      file:
+        path: /usr/local/bin/pg_config
+        src: /usr/pgsql-9.6/bin/pg_config
+        state: link
+
+    - name: Create /data
+      file:
+        path: /data
+        state: directory
+        owner: root
+        group: root
+
+    - name: Create /data/dbdata
+      file:
+        path: "/data/dbdata"
+        state: directory
+        owner: postgres
+        group: postgres
+
+    - name: Create /dbarchive,dbbackup
+      file:
+        path: "/{{ item }}"
+        state: directory
+        owner: postgres
+        group: postgres
+      with_items: ["dbarchive", "dbbackup"]
+
+
+    - name: Copy service file
+      copy:
+        src: ../files/postgresql-9.6.service
+        dest: /etc/systemd/system/postgresql-9.6.service
+
+    - name: systemctl daemon-reload
+      command: /bin/systemctl daemon-reload
+      changed_when: false
+
+    - name: Check for postgres config in data/dbdata
+      stat:
+        path: /data/dbdata/postgresql.conf
+      register: postgres_conf_present
+
+    - name: Init DB in /data/dbdata
+      command: /usr/pgsql-9.6/bin/initdb -D /data/dbdata
+      become: yes
+      become_user: postgres
+      when: not postgres_conf_present.stat.exists
+
+    - name: Add postgresql.conf file
+      copy:
+        dest: /data/dbdata/postgresql.conf
+        src: ../files/postgresql.conf
+        owner: postgres
+        group: postgres
+        backup: yes
+
+    - name: Git setup http proxy
+      become: yes
+      become_user: postgres
+      git_config:
+          scope: global 
+          name: http.proxy
+          value: http://proxy.sfu.ca:8080
+    
+    - name: Check out maintenance script repo
+      become: yes
+      become_user: postgres
+      git:
+        dest: /var/lib/pgsql/maint
+        repo: https://github.com/sfu/pg-maintenance.git
+        clone: yes
+        update: yes
+
+    - name: Crontab full backup
+      cron:
+        minute: "00"
+        hour: "1"
+        day: "*"
+        month: "*" 
+        weekday: "*"
+        job: /var/lib/pgsql/maint/batchjob/nightly.sh
+        user: postgres
+        name: full_backup
+        state: present
+
+    - name: Crontab run hourly cleanup
+      cron:
+        minute: "01"
+        hour: "*"
+        day: "*"
+        month: "*" 
+        weekday: "*"
+        job: /var/lib/pgsql/maint/batchjob/hourly_prod.sh
+        user: postgres
+        name: hourly_cleanup
+        state: present
+
+    - name: Start postgres
+      service:
+        name: postgresql-9.6
+        state: started
+
+    - name: Make ssh directory
+      become: yes
+      become_user: postgres
+      file:
+        path: /var/lib/pgsql/.ssh
+        group: postgres
+        state: directory
+        mode: "0700"
+        owner: postgres
+
+    - name: Add sudoers file
+      copy:
+        src: ../files/98-postgres
+        dest: /etc/sudoers.d/98-postgres
